@@ -1,67 +1,106 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { isEstablished, useSession } from '@fogo/sessions-sdk-react';
 import { UserIdentifierType } from '@fuul/sdk';
-import type { GetClaimCheckTotalsResponse } from '@fuul/sdk';
+import type { ClaimResponse } from '@fuul/sdk';
 import { IoGift } from 'react-icons/io5';
 import { ConnectWalletCard } from '../components/ConnectWalletCard';
 import { ViewLayout } from '../components/ViewLayout';
 import { EmptyState } from '../components/EmptyState';
 import { useFuul } from '~/contexts/FuulContext';
 import { useUserDataStore } from '~/stores/UserDataStore';
+import { useNotificationStore } from '~/stores/NotificationStore';
 import { formatTokenAmount } from '../utils/format-numbers';
+import { useClaimService } from '../hooks/useClaimService';
 import styles from '../affiliates.module.css';
 
+/**
+ * TODO: Before production, remove console.log statements
+ */
 export function ClaimsView() {
     const sessionState = useSession();
     const isConnected = isEstablished(sessionState);
     const { userAddress } = useUserDataStore();
-    const { getClaimTotals } = useFuul();
+    const { getClaimableRewards } = useFuul();
+    const {
+        isLoading: isClaimLoading,
+        error: claimError,
+        executeClaim,
+    } = useClaimService();
+    const { add: addNotification } = useNotificationStore();
 
-    const [claimTotals, setClaimTotals] =
-        useState<GetClaimCheckTotalsResponse | null>(null);
+    const [claimableChecks, setClaimableChecks] = useState<ClaimResponse[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    useEffect(() => {
-        async function fetchClaimTotals() {
-            if (!isConnected || !userAddress) return;
+    const fetchClaimableChecks = useCallback(async () => {
+        if (!isConnected || !userAddress) return;
 
-            setIsLoading(true);
-            setError(null);
+        setIsLoading(true);
+        setError(null);
 
-            try {
-                const result = await getClaimTotals({
-                    user_identifier: userAddress,
-                    user_identifier_type: UserIdentifierType.SolanaAddress,
-                });
-                setClaimTotals(result);
-            } catch (err) {
-                setError(
-                    err instanceof Error
-                        ? err.message
-                        : 'Failed to fetch claim totals',
-                );
-            } finally {
-                setIsLoading(false);
-            }
+        try {
+            console.log(
+                '[ClaimsView] Fetching claimable checks for:',
+                userAddress,
+            );
+            const result = await getClaimableRewards({
+                user_identifier: userAddress,
+                user_identifier_type: UserIdentifierType.SolanaAddress,
+            });
+            console.log('[ClaimsView] Claimable checks result:', result);
+            setClaimableChecks(result || []);
+        } catch (err) {
+            console.error('[ClaimsView] Error fetching claimable checks:', err);
+            setError(
+                err instanceof Error
+                    ? err.message
+                    : 'Failed to fetch claimable rewards',
+            );
+        } finally {
+            setIsLoading(false);
         }
+    }, [isConnected, userAddress, getClaimableRewards]);
 
-        fetchClaimTotals();
-    }, [isConnected, userAddress, getClaimTotals]);
+    useEffect(() => {
+        fetchClaimableChecks();
+    }, [fetchClaimableChecks]);
 
+    // Calculate total from valid claimable checks (already filtered by API)
     const totalClaimable = useMemo(() => {
-        if (!claimTotals?.unclaimed) return 0;
-        return claimTotals.unclaimed.reduce((sum, item) => {
-            return sum + parseFloat(item.amount);
+        if (!claimableChecks || claimableChecks.length === 0) return 0;
+        return claimableChecks.reduce((sum, check) => {
+            return sum + parseFloat(check.amount);
         }, 0);
-    }, [claimTotals]);
+    }, [claimableChecks]);
 
     const hasClaimableRewards = totalClaimable > 0;
 
-    const handleClaim = () => {
-        // Claim logic will be implemented later
-        console.log('Claim rewards clicked');
+    const handleClaim = async () => {
+        setError(null);
+        console.log('[ClaimsView] Starting claim...');
+        const result = await executeClaim();
+        console.log('[ClaimsView] Claim result:', result);
+        if (result.success) {
+            // Show success notification
+            addNotification({
+                title: 'Rewards Claimed',
+                message: `Successfully claimed $${formatTokenAmount(totalClaimable, 6)} in rewards`,
+                icon: 'check',
+            });
+            // Clear claims to show empty state
+            setClaimableChecks([]);
+        } else if (result.error) {
+            // Show error notification
+            addNotification({
+                title: 'Claim Failed',
+                message: result.error,
+                icon: 'error',
+            });
+            setError(result.error);
+        }
     };
+
+    const displayError = error || claimError;
 
     if (!isConnected) {
         return (
@@ -84,11 +123,13 @@ export function ClaimsView() {
         );
     }
 
-    if (error) {
+    if (displayError && !hasClaimableRewards) {
         return (
             <ViewLayout title='Claims'>
                 <div className={styles['glass-card']}>
-                    <p style={{ color: 'var(--aff-negative)' }}>{error}</p>
+                    <p style={{ color: 'var(--aff-negative)' }}>
+                        {displayError}
+                    </p>
                 </div>
             </ViewLayout>
         );
@@ -146,9 +187,9 @@ export function ClaimsView() {
                     <button
                         className={`${styles.btn} ${styles['btn-primary']} ${styles['btn-lg']}`}
                         onClick={handleClaim}
-                        disabled={!hasClaimableRewards}
+                        disabled={!hasClaimableRewards || isClaimLoading}
                     >
-                        Claim Rewards
+                        {isClaimLoading ? 'Claiming...' : 'Claim Rewards'}
                     </button>
                 </div>
             </div>
