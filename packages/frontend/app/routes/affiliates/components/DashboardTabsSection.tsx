@@ -9,6 +9,7 @@ import { ReferredUsersView } from '../views/ReferredUsersView';
 import { LinksView } from '../views/LinksView';
 import { CommissionActivityView } from '../views/CommissionActivityView';
 import { ResourcesView } from '../views/ResourcesView';
+import { ClaimsView } from '../views/ClaimsView';
 import styles from '../affiliates.module.css';
 
 export function DashboardTabsSection() {
@@ -48,6 +49,8 @@ export function DashboardTabsSection() {
                 return <CommissionActivityView />;
             case DashboardTab.Resources:
                 return <ResourcesView />;
+            case DashboardTab.Claims:
+                return <ClaimsView />;
             default:
                 return <ReferredUsersView />;
         }

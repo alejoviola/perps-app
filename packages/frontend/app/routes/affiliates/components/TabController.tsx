@@ -7,6 +7,7 @@ export enum DashboardTab {
     Links = 'links',
     CommissionActivity = 'commission-activity',
     Resources = 'resources',
+    Claims = 'claims',
 }
 
 export interface DashboardTabConfig {
@@ -150,5 +151,9 @@ export const DASHBOARD_TAB_CONFIGS: DashboardTabConfig[] = [
     {
         value: DashboardTab.Resources,
         label: 'Resources',
+    },
+    {
+        value: DashboardTab.Claims,
+        label: 'Claims',
     },
 ];
