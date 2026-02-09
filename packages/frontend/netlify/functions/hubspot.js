@@ -117,6 +117,130 @@ const LANGUAGE_TO_CODE = {
     Yoruba: 'yo',
 };
 
+const PLATFORM_TO_HUBSPOT_CHANNEL = {
+    'X/Twitter': 'X/Twitter',
+    Youtube: 'YouTube',
+    Telegram: 'Telegram',
+    Discord: 'Discord',
+    Facebook: 'Facebook',
+    Instagram: 'Instagram',
+    Tiktok: 'TikTok',
+    Twitch: 'Twitch',
+    Linkedin: 'LinkedIn',
+    'Weibo (微博)': 'Weibo',
+    'WeChat (微信)': 'WeChat',
+    'Xiaohongshu (小红书)': 'Xiaohongshu',
+    'Douyin (抖音)': 'Douyin',
+    KakaoTalk: 'KakaoTalk',
+    Line: 'LINE',
+    VK: 'VK',
+    Odnoklassniki: 'Odnoklassniki',
+    Rutube: 'Rutube',
+    Other: 'Others',
+};
+
+const HUBSPOT_API_BASE = 'https://api.hubapi.com';
+const HUBSPOT_OBJECT_IDS = { SOCIAL_CHANNEL: '2-196061099', DEAL: 'deals' };
+const HUBSPOT_ASSOCIATION_TYPES = {
+    CONTACT_TO_SOCIAL_CHANNEL: 18,
+    CONTACT_TO_DEAL: 4,
+};
+const LIFECYCLE_STAGES = { WAITING_FOR_CONTACT: '3688247493' };
+
+async function hubspotRequest(endpoint, method, body, token) {
+    const response = await fetch(`${HUBSPOT_API_BASE}${endpoint}`, {
+        method,
+        headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+        },
+        body: body ? JSON.stringify(body) : undefined,
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        let parsed = {};
+        try {
+            parsed = JSON.parse(errorText);
+        } catch {
+            //
+        }
+        const err = new Error(parsed.message || 'HubSpot API request failed');
+        err.status = response.status;
+        err.category = parsed.category || 'UNKNOWN';
+        err.details = errorText;
+        err.errors = parsed.errors || [];
+        throw err;
+    }
+
+    return response.json();
+}
+
+function mapFormToContactProperties(body) {
+    const properties = {
+        email: body.email,
+        firstname: body.firstName,
+        lastname: body.lastName,
+        phone: body.phone,
+        instant_messenger: body.im,
+        social_identity_name: body.socialName,
+        wallet_address: body.walletAddress,
+        lifecyclestage: LIFECYCLE_STAGES.WAITING_FOR_CONTACT,
+        referral_update_request: body.upgradeRequest,
+    };
+
+    if (body.recommenderName) {
+        properties.recommender_name = body.recommenderName;
+    }
+    if (body.recommenderEmail) {
+        properties.recommender_email = body.recommenderEmail;
+    }
+    if (body.affiliateAgreement !== undefined) {
+        properties.affiliate_agreement = body.affiliateAgreement;
+    }
+
+    const imProperty = IM_TO_HUBSPOT[body.im];
+    if (imProperty) {
+        properties[imProperty] = body.imHandle;
+    } else {
+        properties.im___others = body.imHandle;
+    }
+
+    if (body.im === 'WhatsApp') {
+        properties.hs_whatsapp_phone_number = body.phone;
+    }
+
+    return properties;
+}
+
+function mapFormToSocialChannelProperties(channel, socialName) {
+    const platform =
+        PLATFORM_TO_HUBSPOT_CHANNEL[channel.platform] || channel.platform;
+    const langCode =
+        LANGUAGE_TO_CODE[channel.language] ||
+        String(channel.language || '').toLowerCase();
+    const followersNum = parseInt(channel.followers, 10);
+
+    return {
+        social_channel_name: `${channel.platform} - @${socialName}`,
+        social_channels: platform,
+        channel_followerssubscribers: Number.isNaN(followersNum)
+            ? 0
+            : followersNum,
+        channel_language: langCode,
+    };
+}
+
+function mapFormToDealProperties(body) {
+    return {
+        dealname: `Affiliate - ${body.email}`,
+        product: 'Ambient',
+        wallet_address: body.walletAddress,
+        wallet_connected: 'Yes',
+        affiliate_agreement: body.affiliateAgreement ? 'true' : 'false',
+    };
+}
+
 export const handler = async (event) => {
     if (event.httpMethod !== 'POST') {
         return {
@@ -125,6 +249,8 @@ export const handler = async (event) => {
             headers: { 'Content-Type': 'application/json' },
         };
     }
+
+    const partialSuccess = {};
 
     try {
         const hubspotToken = process.env.HUBSPOT_PRIVATE_APP_TOKEN;
@@ -140,131 +266,153 @@ export const handler = async (event) => {
 
         const body = event.body ? JSON.parse(event.body) : {};
 
-        const properties = {
-            email: body.email,
-            firstname: body.firstName,
-            lastname: body.lastName,
-            phone: body.phone,
-            instant_messenger: body.im,
-            social_identity_name: body.socialName,
-            wallet_address: body.walletAddress,
-            lifecyclestage: 'lead',
-            referral_update_request: body.upgradeRequest,
-        };
-
-        if (body.recommenderName) {
-            properties.recommender_name = body.recommenderName;
-        }
-        if (body.recommenderEmail) {
-            properties.recommender_email = body.recommenderEmail;
-        }
-        if (body.affiliateAgreement !== undefined) {
-            properties.affiliate_agreement = body.affiliateAgreement;
-        }
-
-        const imProperty = IM_TO_HUBSPOT[body.im];
-        if (imProperty) {
-            properties[imProperty] = body.imHandle;
-        } else {
-            properties.im___others = body.imHandle;
-        }
-
-        if (body.im === 'WhatsApp') {
-            properties.hs_whatsapp_phone_number = body.phone;
-        }
+        const contactProps = mapFormToContactProperties(body);
+        const contact = await hubspotRequest(
+            '/crm/v3/objects/contacts',
+            'POST',
+            { properties: contactProps },
+            hubspotToken,
+        );
+        partialSuccess.contactId = contact.id;
 
         const socialChannels = Array.isArray(body.socialChannels)
             ? body.socialChannels
             : [];
-
+        const socialChannelIds = [];
         for (const channel of socialChannels) {
-            const hubspotPrefix = PLATFORM_TO_HUBSPOT[channel.platform];
-            if (hubspotPrefix && channel.link) {
-                properties[`${hubspotPrefix}_link`] = channel.link;
+            const props = mapFormToSocialChannelProperties(
+                channel,
+                body.socialName,
+            );
+            const result = await hubspotRequest(
+                `/crm/v3/objects/${HUBSPOT_OBJECT_IDS.SOCIAL_CHANNEL}`,
+                'POST',
+                { properties: props },
+                hubspotToken,
+            );
+            socialChannelIds.push(result.id);
+        }
+        partialSuccess.socialChannelIds = socialChannelIds;
 
-                if (channel.followers) {
-                    const followersNum = parseInt(channel.followers, 10);
-                    if (!Number.isNaN(followersNum)) {
-                        properties[`${hubspotPrefix}_followers_subscribers`] =
-                            followersNum;
-                    }
-                }
-
-                if (channel.language) {
-                    const langCode =
-                        LANGUAGE_TO_CODE[channel.language] ||
-                        String(channel.language).toLowerCase();
-                    properties[`${hubspotPrefix}_language`] = langCode;
-                }
-            }
+        if (socialChannelIds.length > 0) {
+            await hubspotRequest(
+                `/crm/v4/associations/contacts/${HUBSPOT_OBJECT_IDS.SOCIAL_CHANNEL}/batch/create`,
+                'POST',
+                {
+                    inputs: socialChannelIds.map((scId) => ({
+                        from: { id: contact.id },
+                        to: { id: scId },
+                        types: [
+                            {
+                                associationCategory: 'USER_DEFINED',
+                                associationTypeId:
+                                    HUBSPOT_ASSOCIATION_TYPES.CONTACT_TO_SOCIAL_CHANNEL,
+                            },
+                        ],
+                    })),
+                },
+                hubspotToken,
+            );
         }
 
-        const hubspotUrl = 'https://api.hubapi.com/crm/v3/objects/contacts';
-        const hubspotResponse = await fetch(hubspotUrl, {
-            method: 'POST',
-            headers: {
-                Authorization: `Bearer ${hubspotToken}`,
-                'Content-Type': 'application/json',
+        const dealProps = mapFormToDealProperties(body);
+        const deal = await hubspotRequest(
+            '/crm/v3/objects/deals',
+            'POST',
+            { properties: dealProps },
+            hubspotToken,
+        );
+        partialSuccess.dealId = deal.id;
+
+        await hubspotRequest(
+            `/crm/v4/associations/contacts/${HUBSPOT_OBJECT_IDS.DEAL}/batch/create`,
+            'POST',
+            {
+                inputs: [
+                    {
+                        from: { id: contact.id },
+                        to: { id: deal.id },
+                        types: [
+                            {
+                                associationCategory: 'HUBSPOT_DEFINED',
+                                associationTypeId:
+                                    HUBSPOT_ASSOCIATION_TYPES.CONTACT_TO_DEAL,
+                            },
+                        ],
+                    },
+                ],
             },
-            body: JSON.stringify({ properties }),
-        });
-
-        if (!hubspotResponse.ok) {
-            const errorText = await hubspotResponse.text();
-
-            let errorCode = 'UNKNOWN';
-            let errorMessage = 'Failed to create contact in HubSpot';
-
-            try {
-                const errorData = JSON.parse(errorText);
-                errorCode = errorData.category || 'UNKNOWN';
-
-                if (
-                    errorCode === 'CONFLICT' &&
-                    errorData.message?.includes('Contact already exists')
-                ) {
-                    errorMessage =
-                        'This email is already registered. Please use a different email address.';
-                } else if (errorCode === 'VALIDATION_ERROR') {
-                    errorMessage =
-                        'Invalid data provided. Please check your information and try again.';
-                } else if (errorData.message) {
-                    errorMessage = errorData.message;
-                }
-            } catch {
-                // ignore
-            }
-
-            return {
-                statusCode: hubspotResponse.status,
-                body: JSON.stringify({
-                    error: errorMessage,
-                    code: errorCode,
-                    details: errorText,
-                }),
-                headers: { 'Content-Type': 'application/json' },
-            };
-        }
-
-        const responseData = await hubspotResponse.json();
+            hubspotToken,
+        );
 
         return {
             statusCode: 200,
             body: JSON.stringify({
                 success: true,
-                message: 'Contact created successfully',
-                data: responseData,
+                message: 'Affiliate application created successfully',
+                data: {
+                    contactId: contact.id,
+                    socialChannelIds,
+                    dealId: deal.id,
+                },
             }),
             headers: { 'Content-Type': 'application/json' },
         };
     } catch (error) {
+        const fieldErrors = {};
+        let errorCode = error.category || 'UNKNOWN';
+        let errorMessage =
+            error.message || 'Failed to create affiliate application';
+
+        if (
+            errorCode === 'CONFLICT' &&
+            error.message?.includes('Contact already exists')
+        ) {
+            errorMessage =
+                'This email is already registered. Please use a different email address.';
+            fieldErrors.email = errorMessage;
+        } else if (errorCode === 'VALIDATION_ERROR' && error.errors?.length) {
+            errorMessage =
+                'Invalid data provided. Please check your information and try again.';
+            for (const err of error.errors) {
+                const props = err?.context?.propertyName;
+                const msg = err?.message || errorMessage;
+                if (Array.isArray(props)) {
+                    for (const prop of props) {
+                        if (prop === 'email') fieldErrors.email = msg;
+                        else if (prop === 'firstname')
+                            fieldErrors.firstName = msg;
+                        else if (prop === 'lastname')
+                            fieldErrors.lastName = msg;
+                        else if (prop === 'phone') fieldErrors.phone = msg;
+                        else if (
+                            prop.startsWith('im___') ||
+                            prop === 'hs_whatsapp_phone_number'
+                        )
+                            fieldErrors.imHandle = msg;
+                    }
+                }
+            }
+        }
+
+        const statusCode = error.status || 500;
+        const responseBody = {
+            error: errorMessage,
+            code: errorCode,
+            details: error.details || error.message || 'Unknown error',
+        };
+
+        if (Object.keys(fieldErrors).length > 0) {
+            responseBody.fieldErrors = fieldErrors;
+        }
+
+        if (Object.keys(partialSuccess).length > 0) {
+            responseBody.partialSuccess = partialSuccess;
+        }
+
         return {
-            statusCode: 500,
-            body: JSON.stringify({
-                error: 'Internal server error',
-                details:
-                    error instanceof Error ? error.message : 'Unknown error',
-            }),
+            statusCode,
+            body: JSON.stringify(responseBody),
             headers: { 'Content-Type': 'application/json' },
         };
     }
